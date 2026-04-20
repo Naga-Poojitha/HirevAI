@@ -28,6 +28,7 @@ export type Database = {
           resume_path: string | null
           role: string
           scores: Json | null
+          screening_candidate_id: string | null
           started_at: string
           status: string
           strengths: Json | null
@@ -48,6 +49,7 @@ export type Database = {
           resume_path?: string | null
           role: string
           scores?: Json | null
+          screening_candidate_id?: string | null
           started_at?: string
           status?: string
           strengths?: Json | null
@@ -68,6 +70,7 @@ export type Database = {
           resume_path?: string | null
           role?: string
           scores?: Json | null
+          screening_candidate_id?: string | null
           started_at?: string
           status?: string
           strengths?: Json | null
@@ -116,15 +119,146 @@ export type Database = {
         }
         Relationships: []
       }
+      screening_candidates: {
+        Row: {
+          candidate_email: string | null
+          candidate_name: string | null
+          created_at: string
+          gaps: Json | null
+          id: string
+          interview_id: string | null
+          invite_status: string
+          job_id: string
+          parse_status: string
+          rank: number | null
+          reasons: Json | null
+          resume_path: string
+          resume_text: string | null
+          score: number | null
+          shortlisted: boolean
+          strengths: Json | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          candidate_email?: string | null
+          candidate_name?: string | null
+          created_at?: string
+          gaps?: Json | null
+          id?: string
+          interview_id?: string | null
+          invite_status?: string
+          job_id: string
+          parse_status?: string
+          rank?: number | null
+          reasons?: Json | null
+          resume_path: string
+          resume_text?: string | null
+          score?: number | null
+          shortlisted?: boolean
+          strengths?: Json | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          candidate_email?: string | null
+          candidate_name?: string | null
+          created_at?: string
+          gaps?: Json | null
+          id?: string
+          interview_id?: string | null
+          invite_status?: string
+          job_id?: string
+          parse_status?: string
+          rank?: number | null
+          reasons?: Json | null
+          resume_path?: string
+          resume_text?: string | null
+          score?: number | null
+          shortlisted?: boolean
+          strengths?: Json | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "screening_candidates_job_id_fkey"
+            columns: ["job_id"]
+            isOneToOne: false
+            referencedRelation: "screening_jobs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      screening_jobs: {
+        Row: {
+          created_at: string
+          id: string
+          job_description: string
+          status: string
+          title: string
+          top_x: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          job_description: string
+          status?: string
+          title: string
+          top_x?: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          job_description?: string
+          status?: string
+          title?: string
+          top_x?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      user_roles: {
+        Row: {
+          created_at: string
+          id: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      has_role: {
+        Args: {
+          _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
     }
     Enums: {
-      [_ in never]: never
+      app_role: "admin" | "recruiter" | "user"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -251,6 +385,8 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      app_role: ["admin", "recruiter", "user"],
+    },
   },
 } as const
