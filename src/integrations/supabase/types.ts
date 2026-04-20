@@ -14,7 +14,108 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      interviews: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          experience_level: string
+          full_name: string
+          id: string
+          improvements: Json | null
+          questions: Json | null
+          recommendation: string | null
+          resume_data: Json | null
+          resume_path: string | null
+          role: string
+          scores: Json | null
+          started_at: string
+          status: string
+          strengths: Json | null
+          transcript: Json | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          experience_level: string
+          full_name: string
+          id?: string
+          improvements?: Json | null
+          questions?: Json | null
+          recommendation?: string | null
+          resume_data?: Json | null
+          resume_path?: string | null
+          role: string
+          scores?: Json | null
+          started_at?: string
+          status?: string
+          strengths?: Json | null
+          transcript?: Json | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          experience_level?: string
+          full_name?: string
+          id?: string
+          improvements?: Json | null
+          questions?: Json | null
+          recommendation?: string | null
+          resume_data?: Json | null
+          resume_path?: string | null
+          role?: string
+          scores?: Json | null
+          started_at?: string
+          status?: string
+          strengths?: Json | null
+          transcript?: Json | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          created_at: string
+          email: string | null
+          experience_level: string | null
+          full_name: string | null
+          id: string
+          resume_data: Json | null
+          resume_path: string | null
+          role: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          email?: string | null
+          experience_level?: string | null
+          full_name?: string | null
+          id?: string
+          resume_data?: Json | null
+          resume_path?: string | null
+          role?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          email?: string | null
+          experience_level?: string | null
+          full_name?: string | null
+          id?: string
+          resume_data?: Json | null
+          resume_path?: string | null
+          role?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
