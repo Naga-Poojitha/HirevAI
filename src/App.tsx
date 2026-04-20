@@ -8,6 +8,7 @@ import Auth from "./pages/Auth.tsx";
 import Setup from "./pages/Setup.tsx";
 import Interview from "./pages/Interview.tsx";
 import Report from "./pages/Report.tsx";
+import Screen from "./pages/Screen.tsx";
 import NotFound from "./pages/NotFound.tsx";
 
 const queryClient = new QueryClient();
@@ -24,6 +25,7 @@ const App = () => (
           <Route path="/setup" element={<Setup />} />
           <Route path="/interview/:id" element={<Interview />} />
           <Route path="/report/:id" element={<Report />} />
+          <Route path="/screen" element={<Screen />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>

@@ -30,6 +30,9 @@ export const TopNav = () => {
         <nav className="flex items-center gap-2">
           {user ? (
             <>
+              <Link to="/screen">
+                <Button variant="ghost" size="sm">Bulk screen</Button>
+              </Link>
               <Link to="/setup">
                 <Button variant="ghost" size="sm">New interview</Button>
               </Link>
