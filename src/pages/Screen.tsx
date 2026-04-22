@@ -31,6 +31,23 @@ type Candidate = {
   invite_status: string;
 };
 
+type ScreeningPhase = "idle" | "creating" | "uploading" | "parsing" | "scoring" | "ranking" | "completed" | "failed";
+type ProgressState = { done: number; total: number; failed: number };
+
+const STARTUP_BATCH_SIZE = 3;
+const PARSE_BATCH_SIZE = 4;
+const SCORE_BATCH_SIZE = 3;
+const JOB_TIMEOUT_MS = 20000;
+const DB_TIMEOUT_MS = 20000;
+const UPLOAD_TIMEOUT_MS = 45000;
+const PARSE_TIMEOUT_MS = 60000;
+const SCORE_TIMEOUT_MS = 75000;
+const FINALIZE_TIMEOUT_MS = 30000;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const Screen = () => {
   const navigate = useNavigate();
   const { isRecruiter, loading: roleLoading } = useRole();
@@ -41,8 +58,10 @@ const Screen = () => {
   const [files, setFiles] = useState<File[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [progress, setProgress] = useState({ done: 0, total: 0 });
-  const [phase, setPhase] = useState<"idle" | "uploading" | "parsing" | "scoring" | "ranking" | "completed">("idle");
+  const [progress, setProgress] = useState<ProgressState>({ done: 0, total: 0, failed: 0 });
+  const [phase, setPhase] = useState<ScreeningPhase>("idle");
+  const [statusMessage, setStatusMessage] = useState("");
+  const [runError, setRunError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [grantingRole, setGrantingRole] = useState(false);
 
@@ -100,95 +119,145 @@ const Screen = () => {
     if (topX < 1 || topX > files.length) return toast.error("Top X must be between 1 and total resumes");
 
     setRunning(true);
-    setPhase("uploading");
+    setRunError(null);
+    setStatusMessage("Starting screening job...");
+    setProgress({ done: 0, total: 0, failed: 0 });
+    setPhase("creating");
+
+    let activeJobId: string | null = null;
     try {
-      // 1. Create job
-      const { data: job, error: jerr } = await supabase
-        .from("screening_jobs")
-        .insert({ user_id: userId, title, job_description: jd, top_x: topX, status: "uploading" })
-        .select("id").single();
-      if (jerr || !job) throw jerr ?? new Error("job create failed");
+      const nextJobId = crypto.randomUUID();
+      const job = await expectSingle<{ id: string }>(
+        "create screening job",
+        async () => await supabase
+          .from("screening_jobs")
+          .upsert({ id: nextJobId, user_id: userId, title, job_description: jd, top_x: topX, status: "uploading" }, { onConflict: "id" })
+          .select("id")
+          .single(),
+        JOB_TIMEOUT_MS,
+        2,
+      );
+      activeJobId = job.id;
       setJobId(job.id);
 
       // 2. Upload + insert candidate rows
       const candidateIds: string[] = [];
-      setProgress({ done: 0, total: files.length });
+      setPhase("uploading");
+      setStatusMessage(`Uploading ${files.length} resume${files.length === 1 ? "" : "s"}...`);
+      setProgress({ done: 0, total: files.length, failed: 0 });
       let uploadDone = 0;
-      for (const f of files) {
-        try {
+      let uploadFailed = 0;
+      for (const batch of chunk(files, STARTUP_BATCH_SIZE)) {
+        const batchResults = await Promise.allSettled(batch.map(async (f) => {
           const safeName = f.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-          const path = `${userId}/${job.id}/${crypto.randomUUID()}-${safeName}`;
-          const { error: upErr } = await supabase.storage.from("screening-resumes").upload(path, f, { upsert: false });
-          if (upErr) { toast.error(`Upload failed: ${f.name}`); continue; }
-          const { data: cand, error: cErr } = await supabase
-            .from("screening_candidates")
-            .insert({
-              job_id: job.id,
-              user_id: userId,
-              candidate_name: f.name.replace(/\.[^.]+$/, ""),
-              resume_path: path,
-              parse_status: "pending",
-            })
-            .select("id").single();
-          if (cErr || !cand) { toast.error(`DB insert failed: ${f.name}`); continue; }
-          candidateIds.push(cand.id);
-        } catch (e) {
-          console.error("upload exception", f.name, e);
-        } finally {
-          uploadDone++;
-          setProgress({ done: uploadDone, total: files.length });
+          const candidateId = crypto.randomUUID();
+          const path = `${userId}/${job.id}/${candidateId}-${safeName}`;
+
+          await retryTask(
+            `upload ${f.name}`,
+            async () => {
+              const { error } = await supabase.storage.from("screening-resumes").upload(path, f, { upsert: true });
+              if (error) throw error;
+            },
+            UPLOAD_TIMEOUT_MS,
+            2,
+          );
+
+          const candidate = await expectSingle<{ id: string }>(
+            `create candidate for ${f.name}`,
+            async () => await supabase
+              .from("screening_candidates")
+              .upsert({
+                id: candidateId,
+                job_id: job.id,
+                user_id: userId,
+                candidate_name: f.name.replace(/\.[^.]+$/, ""),
+                resume_path: path,
+                parse_status: "pending",
+              }, { onConflict: "id" })
+              .select("id")
+              .single(),
+            DB_TIMEOUT_MS,
+            2,
+          );
+
+          return candidate.id;
+        }));
+
+        for (const result of batchResults) {
+          uploadDone += 1;
+          if (result.status === "fulfilled") {
+            candidateIds.push(result.value);
+          } else {
+            uploadFailed += 1;
+            console.error("resume startup failed", result.reason);
+          }
+          setProgress({ done: uploadDone, total: files.length, failed: uploadFailed });
         }
       }
+
       if (candidateIds.length === 0) throw new Error("No resumes were uploaded successfully");
       await refreshCandidates(job.id);
 
       // 3. Parse resumes (parallel batches, never block on a single one)
       setPhase("parsing");
-      await supabase.from("screening_jobs").update({ status: "parsing" }).eq("id", job.id);
-      setProgress({ done: 0, total: candidateIds.length });
+      setStatusMessage(`Parsing ${candidateIds.length} candidate resume${candidateIds.length === 1 ? "" : "s"}...`);
+      await updateJobStatus(job.id, "parsing");
+      setProgress({ done: 0, total: candidateIds.length, failed: 0 });
       let parseDone = 0;
-      for (const batch of chunk(candidateIds, 4)) {
+      let parseFailed = 0;
+      for (const batch of chunk(candidateIds, PARSE_BATCH_SIZE)) {
         await Promise.allSettled(batch.map((id) =>
-          invokeWithTimeout("parse-resume", { candidateId: id }, 60000).catch((e) => {
+          invokeWithTimeout("parse-resume", { candidateId: id }, PARSE_TIMEOUT_MS).catch((e) => {
             console.error("parse failed", id, e);
+            parseFailed += 1;
             // mark as failed so scoring step skips gracefully
             return supabase.from("screening_candidates")
               .update({ parse_status: "failed" }).eq("id", id);
           })
         ));
         parseDone += batch.length;
-        setProgress({ done: parseDone, total: candidateIds.length });
+        setProgress({ done: parseDone, total: candidateIds.length, failed: parseFailed });
       }
 
       // 4. Score (parallel batches of 3, with timeout per call)
       setPhase("scoring");
-      await supabase.from("screening_jobs").update({ status: "scoring" }).eq("id", job.id);
-      setProgress({ done: 0, total: candidateIds.length });
+      setStatusMessage(`Scoring ${candidateIds.length} candidate${candidateIds.length === 1 ? "" : "s"}...`);
+      await updateJobStatus(job.id, "scoring");
+      setProgress({ done: 0, total: candidateIds.length, failed: 0 });
       let scoreDone = 0;
-      for (const batch of chunk(candidateIds, 3)) {
+      let scoreFailed = 0;
+      for (const batch of chunk(candidateIds, SCORE_BATCH_SIZE)) {
         await Promise.allSettled(batch.map((id) =>
-          invokeWithTimeout("screen-candidate", { candidateId: id }, 75000).catch((e) => {
+          invokeWithTimeout("screen-candidate", { candidateId: id }, SCORE_TIMEOUT_MS).catch((e) => {
             console.error("score failed", id, e);
+            scoreFailed += 1;
             return supabase.from("screening_candidates")
               .update({ score: 0, reasons: ["Scoring failed (timeout or error)"] })
               .eq("id", id);
           })
         ));
         scoreDone += batch.length;
-        setProgress({ done: scoreDone, total: candidateIds.length });
+        setProgress({ done: scoreDone, total: candidateIds.length, failed: scoreFailed });
       }
 
       // 5. Finalize ranking
       setPhase("ranking");
-      await invokeWithTimeout("finalize-screening", { jobId: job.id }, 30000)
+      setStatusMessage("Ranking candidates and building shortlist...");
+      await invokeWithTimeout("finalize-screening", { jobId: job.id }, FINALIZE_TIMEOUT_MS)
         .catch((e) => { console.error("finalize failed", e); });
       await refreshCandidates(job.id);
       setPhase("completed");
+      setStatusMessage(`Completed. Ranked ${candidateIds.length} candidate${candidateIds.length === 1 ? "" : "s"}.`);
       toast.success("Screening complete");
     } catch (e) {
       console.error(e);
-      setPhase("idle");
-      toast.error(e instanceof Error ? e.message : "Screening failed");
+      const message = e instanceof Error ? e.message : "Screening failed";
+      setPhase("failed");
+      setRunError(message);
+      setStatusMessage("Screening stopped before processing could finish.");
+      if (activeJobId) await updateJobStatus(activeJobId, "failed");
+      toast.error(message);
     } finally {
       setRunning(false);
     }
@@ -196,13 +265,65 @@ const Screen = () => {
 
   // Wrap supabase.functions.invoke with a hard timeout so a single hanging call can't freeze the flow.
   async function invokeWithTimeout(name: string, body: unknown, ms: number) {
-    return await Promise.race([
-      supabase.functions.invoke(name, { body }).then((res) => {
-        if (res.error) throw res.error;
-        return res.data;
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} timeout`)), ms)),
-    ]);
+    return await retryTask(
+      `start ${name}`,
+      async () => await Promise.race([
+        supabase.functions.invoke(name, { body }).then((res) => {
+          if (res.error) throw res.error;
+          return res.data;
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} timeout`)), ms)),
+      ]),
+      ms + 5000,
+      1,
+    );
+  }
+
+  async function updateJobStatus(id: string, status: string) {
+    try {
+      await retryTask(
+        `update job status to ${status}`,
+        async () => {
+          const { error } = await supabase.from("screening_jobs").update({ status }).eq("id", id);
+          if (error) throw error;
+        },
+        DB_TIMEOUT_MS,
+        1,
+      );
+    } catch (error) {
+      console.error("job status update failed", id, status, error);
+    }
+  }
+
+  async function expectSingle<T>(
+    label: string,
+    task: () => Promise<{ data: T | null; error: { message?: string } | null }>,
+    timeoutMs: number,
+    retries = 1,
+  ): Promise<T> {
+    return retryTask(label, async () => {
+      const { data, error } = await task();
+      if (error || !data) throw new Error(error?.message ?? `${label} failed`);
+      return data;
+    }, timeoutMs, retries);
+  }
+
+  async function retryTask<T>(label: string, task: () => Promise<T>, timeoutMs: number, retries = 1): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        return await Promise.race([
+          task(),
+          new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs)),
+        ]);
+      } catch (error) {
+        lastError = error;
+        if (attempt === retries) break;
+        setStatusMessage(`${label} retrying (${attempt + 1}/${retries})...`);
+        await sleep(1200 * (attempt + 1));
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(`${label} failed`);
   }
 
   const sendInvite = async (c: Candidate) => {
@@ -234,8 +355,17 @@ const Screen = () => {
   const updateTopX = async (newTopX: number) => {
     if (!jobId) { setTopX(newTopX); return; }
     setTopX(newTopX);
-    await supabase.from("screening_jobs").update({ top_x: newTopX }).eq("id", jobId);
-    await supabase.functions.invoke("finalize-screening", { body: { jobId } });
+    await updateJobStatus(jobId, phase === "completed" ? "ranking" : "draft");
+    await retryTask(
+      "update shortlist size",
+      async () => {
+        const { error } = await supabase.from("screening_jobs").update({ top_x: newTopX }).eq("id", jobId);
+        if (error) throw error;
+      },
+      DB_TIMEOUT_MS,
+      1,
+    );
+    await invokeWithTimeout("finalize-screening", { jobId }, FINALIZE_TIMEOUT_MS);
   };
 
   if (roleLoading) {
@@ -335,16 +465,23 @@ const Screen = () => {
 
           <div className="flex items-center justify-between gap-4">
             <div className="text-sm text-muted-foreground">
-              {running && progress.total > 0 ? (
-                <span>
-                  {phase === "uploading" && "Uploading resumes"}
-                  {phase === "parsing" && "Parsing resumes"}
-                  {phase === "scoring" && "Scoring candidates"}
-                  {phase === "ranking" && "Ranking candidates"}
-                  {" "}· {progress.done}/{progress.total}
-                </span>
+              {running ? (
+                <div className="space-y-1">
+                  <div>
+                    {phase === "creating" && "Creating screening job"}
+                    {phase === "uploading" && "Uploading resumes"}
+                    {phase === "parsing" && "Parsing resumes"}
+                    {phase === "scoring" && "Scoring candidates"}
+                    {phase === "ranking" && "Ranking candidates"}
+                    {progress.total > 0 ? ` · ${progress.done}/${progress.total}` : ""}
+                    {progress.failed > 0 ? ` · ${progress.failed} failed` : ""}
+                  </div>
+                  {statusMessage && <div className="text-xs text-muted-foreground/80">{statusMessage}</div>}
+                </div>
               ) : phase === "completed" ? (
                 <span className="text-primary">Completed · {candidates.length} candidates ranked</span>
+              ) : phase === "failed" && runError ? (
+                <span className="text-destructive">{runError}</span>
               ) : (
                 <span>{files.length} resume(s) · top {topX} will be shortlisted</span>
               )}
@@ -353,8 +490,13 @@ const Screen = () => {
               {running ? <><Loader2 className="animate-spin" /> Screening…</> : <><Sparkles /> Start screening</>}
             </Button>
           </div>
-          {running && progress.total > 0 && (
-            <Progress value={(progress.done / progress.total) * 100} />
+          {running && (
+            <Progress value={progress.total > 0 ? (progress.done / progress.total) * 100 : 8} />
+          )}
+          {!running && runError && (
+            <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              {runError}
+            </div>
           )}
         </Card>
 
