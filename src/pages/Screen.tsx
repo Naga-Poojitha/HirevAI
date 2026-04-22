@@ -256,7 +256,7 @@ const Screen = () => {
       setPhase("failed");
       setRunError(message);
       setStatusMessage("Screening stopped before processing could finish.");
-      if (activeJobId) await updateJobStatus(activeJobId, "draft");
+      if (activeJobId) await updateJobStatus(activeJobId, "failed");
       toast.error(message);
     } finally {
       setRunning(false);
@@ -265,13 +265,18 @@ const Screen = () => {
 
   // Wrap supabase.functions.invoke with a hard timeout so a single hanging call can't freeze the flow.
   async function invokeWithTimeout(name: string, body: unknown, ms: number) {
-    return await Promise.race([
-      supabase.functions.invoke(name, { body }).then((res) => {
-        if (res.error) throw res.error;
-        return res.data;
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} timeout`)), ms)),
-    ]);
+    return await retryTask(
+      `start ${name}`,
+      async () => await Promise.race([
+        supabase.functions.invoke(name, { body }).then((res) => {
+          if (res.error) throw res.error;
+          return res.data;
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} timeout`)), ms)),
+      ]),
+      ms + 5000,
+      1,
+    );
   }
 
   async function updateJobStatus(id: string, status: string) {
