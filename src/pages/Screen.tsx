@@ -486,7 +486,7 @@ const Screen = () => {
             </Button>
           </div>
           {running && (
-            <Progress value={(progress.done / progress.total) * 100} />
+            <Progress value={progress.total > 0 ? (progress.done / progress.total) * 100 : 8} />
           )}
           {!running && runError && (
             <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
