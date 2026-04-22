@@ -42,6 +42,7 @@ const Screen = () => {
   const [jobId, setJobId] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [phase, setPhase] = useState<"idle" | "uploading" | "parsing" | "scoring" | "ranking" | "completed">("idle");
   const [running, setRunning] = useState(false);
   const [grantingRole, setGrantingRole] = useState(false);
 
@@ -99,6 +100,7 @@ const Screen = () => {
     if (topX < 1 || topX > files.length) return toast.error("Top X must be between 1 and total resumes");
 
     setRunning(true);
+    setPhase("uploading");
     try {
       // 1. Create job
       const { data: job, error: jerr } = await supabase
@@ -111,63 +113,97 @@ const Screen = () => {
       // 2. Upload + insert candidate rows
       const candidateIds: string[] = [];
       setProgress({ done: 0, total: files.length });
+      let uploadDone = 0;
       for (const f of files) {
-        const safeName = f.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-        const path = `${userId}/${job.id}/${crypto.randomUUID()}-${safeName}`;
-        const { error: upErr } = await supabase.storage.from("screening-resumes").upload(path, f, { upsert: false });
-        if (upErr) { toast.error(`Upload failed: ${f.name}`); continue; }
-        const { data: cand, error: cErr } = await supabase
-          .from("screening_candidates")
-          .insert({
-            job_id: job.id,
-            user_id: userId,
-            candidate_name: f.name.replace(/\.[^.]+$/, ""),
-            resume_path: path,
-            parse_status: "pending",
-          })
-          .select("id").single();
-        if (cErr || !cand) continue;
-        candidateIds.push(cand.id);
+        try {
+          const safeName = f.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+          const path = `${userId}/${job.id}/${crypto.randomUUID()}-${safeName}`;
+          const { error: upErr } = await supabase.storage.from("screening-resumes").upload(path, f, { upsert: false });
+          if (upErr) { toast.error(`Upload failed: ${f.name}`); continue; }
+          const { data: cand, error: cErr } = await supabase
+            .from("screening_candidates")
+            .insert({
+              job_id: job.id,
+              user_id: userId,
+              candidate_name: f.name.replace(/\.[^.]+$/, ""),
+              resume_path: path,
+              parse_status: "pending",
+            })
+            .select("id").single();
+          if (cErr || !cand) { toast.error(`DB insert failed: ${f.name}`); continue; }
+          candidateIds.push(cand.id);
+        } catch (e) {
+          console.error("upload exception", f.name, e);
+        } finally {
+          uploadDone++;
+          setProgress({ done: uploadDone, total: files.length });
+        }
       }
+      if (candidateIds.length === 0) throw new Error("No resumes were uploaded successfully");
       await refreshCandidates(job.id);
 
-      // 3. Parse resumes (in parallel batches of 4)
+      // 3. Parse resumes (parallel batches, never block on a single one)
+      setPhase("parsing");
       await supabase.from("screening_jobs").update({ status: "parsing" }).eq("id", job.id);
-      const batches = chunk(candidateIds, 4);
-      let done = 0;
-      for (const batch of batches) {
-        await Promise.all(batch.map(async (id) => {
-          const { error } = await supabase.functions.invoke("parse-resume", { body: { candidateId: id } });
-          if (error) console.error("parse error", id, error);
-        }));
-        done += batch.length;
-        setProgress({ done, total: candidateIds.length });
+      setProgress({ done: 0, total: candidateIds.length });
+      let parseDone = 0;
+      for (const batch of chunk(candidateIds, 4)) {
+        await Promise.allSettled(batch.map((id) =>
+          invokeWithTimeout("parse-resume", { candidateId: id }, 60000).catch((e) => {
+            console.error("parse failed", id, e);
+            // mark as failed so scoring step skips gracefully
+            return supabase.from("screening_candidates")
+              .update({ parse_status: "failed" }).eq("id", id);
+          })
+        ));
+        parseDone += batch.length;
+        setProgress({ done: parseDone, total: candidateIds.length });
       }
 
-      // 4. Score
+      // 4. Score (parallel batches of 3, with timeout per call)
+      setPhase("scoring");
       await supabase.from("screening_jobs").update({ status: "scoring" }).eq("id", job.id);
-      done = 0;
       setProgress({ done: 0, total: candidateIds.length });
+      let scoreDone = 0;
       for (const batch of chunk(candidateIds, 3)) {
-        await Promise.all(batch.map(async (id) => {
-          const { error } = await supabase.functions.invoke("screen-candidate", { body: { candidateId: id } });
-          if (error) console.error("score error", id, error);
-        }));
-        done += batch.length;
-        setProgress({ done, total: candidateIds.length });
+        await Promise.allSettled(batch.map((id) =>
+          invokeWithTimeout("screen-candidate", { candidateId: id }, 75000).catch((e) => {
+            console.error("score failed", id, e);
+            return supabase.from("screening_candidates")
+              .update({ score: 0, reasons: ["Scoring failed (timeout or error)"] })
+              .eq("id", id);
+          })
+        ));
+        scoreDone += batch.length;
+        setProgress({ done: scoreDone, total: candidateIds.length });
       }
 
       // 5. Finalize ranking
-      await supabase.functions.invoke("finalize-screening", { body: { jobId: job.id } });
+      setPhase("ranking");
+      await invokeWithTimeout("finalize-screening", { jobId: job.id }, 30000)
+        .catch((e) => { console.error("finalize failed", e); });
       await refreshCandidates(job.id);
+      setPhase("completed");
       toast.success("Screening complete");
     } catch (e) {
       console.error(e);
+      setPhase("idle");
       toast.error(e instanceof Error ? e.message : "Screening failed");
     } finally {
       setRunning(false);
     }
   };
+
+  // Wrap supabase.functions.invoke with a hard timeout so a single hanging call can't freeze the flow.
+  async function invokeWithTimeout(name: string, body: unknown, ms: number) {
+    return await Promise.race([
+      supabase.functions.invoke(name, { body }).then((res) => {
+        if (res.error) throw res.error;
+        return res.data;
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} timeout`)), ms)),
+    ]);
+  }
 
   const sendInvite = async (c: Candidate) => {
     if (!userId) return;
@@ -300,7 +336,15 @@ const Screen = () => {
           <div className="flex items-center justify-between gap-4">
             <div className="text-sm text-muted-foreground">
               {running && progress.total > 0 ? (
-                <span>Processing {progress.done}/{progress.total}…</span>
+                <span>
+                  {phase === "uploading" && "Uploading resumes"}
+                  {phase === "parsing" && "Parsing resumes"}
+                  {phase === "scoring" && "Scoring candidates"}
+                  {phase === "ranking" && "Ranking candidates"}
+                  {" "}· {progress.done}/{progress.total}
+                </span>
+              ) : phase === "completed" ? (
+                <span className="text-primary">Completed · {candidates.length} candidates ranked</span>
               ) : (
                 <span>{files.length} resume(s) · top {topX} will be shortlisted</span>
               )}
