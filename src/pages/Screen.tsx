@@ -129,7 +129,7 @@ const Screen = () => {
       const nextJobId = crypto.randomUUID();
       const job = await expectSingle<{ id: string }>(
         "create screening job",
-        () => supabase
+        async () => await supabase
           .from("screening_jobs")
           .upsert({ id: nextJobId, user_id: userId, title, job_description: jd, top_x: topX, status: "uploading" }, { onConflict: "id" })
           .select("id")
@@ -165,7 +165,7 @@ const Screen = () => {
 
           const candidate = await expectSingle<{ id: string }>(
             `create candidate for ${f.name}`,
-            () => supabase
+            async () => await supabase
               .from("screening_candidates")
               .upsert({
                 id: candidateId,
@@ -460,16 +460,23 @@ const Screen = () => {
 
           <div className="flex items-center justify-between gap-4">
             <div className="text-sm text-muted-foreground">
-              {running && progress.total > 0 ? (
-                <span>
-                  {phase === "uploading" && "Uploading resumes"}
-                  {phase === "parsing" && "Parsing resumes"}
-                  {phase === "scoring" && "Scoring candidates"}
-                  {phase === "ranking" && "Ranking candidates"}
-                  {" "}· {progress.done}/{progress.total}
-                </span>
+              {running ? (
+                <div className="space-y-1">
+                  <div>
+                    {phase === "creating" && "Creating screening job"}
+                    {phase === "uploading" && "Uploading resumes"}
+                    {phase === "parsing" && "Parsing resumes"}
+                    {phase === "scoring" && "Scoring candidates"}
+                    {phase === "ranking" && "Ranking candidates"}
+                    {progress.total > 0 ? ` · ${progress.done}/${progress.total}` : ""}
+                    {progress.failed > 0 ? ` · ${progress.failed} failed` : ""}
+                  </div>
+                  {statusMessage && <div className="text-xs text-muted-foreground/80">{statusMessage}</div>}
+                </div>
               ) : phase === "completed" ? (
                 <span className="text-primary">Completed · {candidates.length} candidates ranked</span>
+              ) : phase === "failed" && runError ? (
+                <span className="text-destructive">{runError}</span>
               ) : (
                 <span>{files.length} resume(s) · top {topX} will be shortlisted</span>
               )}
@@ -478,8 +485,13 @@ const Screen = () => {
               {running ? <><Loader2 className="animate-spin" /> Screening…</> : <><Sparkles /> Start screening</>}
             </Button>
           </div>
-          {running && progress.total > 0 && (
+          {running && (
             <Progress value={(progress.done / progress.total) * 100} />
+          )}
+          {!running && runError && (
+            <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              {runError}
+            </div>
           )}
         </Card>
 
