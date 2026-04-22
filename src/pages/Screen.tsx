@@ -336,7 +336,15 @@ const Screen = () => {
           <div className="flex items-center justify-between gap-4">
             <div className="text-sm text-muted-foreground">
               {running && progress.total > 0 ? (
-                <span>Processing {progress.done}/{progress.total}…</span>
+                <span>
+                  {phase === "uploading" && "Uploading resumes"}
+                  {phase === "parsing" && "Parsing resumes"}
+                  {phase === "scoring" && "Scoring candidates"}
+                  {phase === "ranking" && "Ranking candidates"}
+                  {" "}· {progress.done}/{progress.total}
+                </span>
+              ) : phase === "completed" ? (
+                <span className="text-primary">Completed · {candidates.length} candidates ranked</span>
               ) : (
                 <span>{files.length} resume(s) · top {topX} will be shortlisted</span>
               )}
