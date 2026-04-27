@@ -9,17 +9,37 @@ export const useRole = () => {
 
   useEffect(() => {
     let active = true;
-    const load = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) { if (active) { setRoles([]); setLoading(false); } return; }
-      const { data } = await supabase.from("user_roles").select("role").eq("user_id", session.user.id);
-      if (active) {
-        setRoles((data ?? []).map((r) => r.role as AppRole));
-        setLoading(false);
-      }
+    let lastUserId: string | null = null;
+
+    const fetchRoles = async (userId: string) => {
+      const { data } = await supabase.from("user_roles").select("role").eq("user_id", userId);
+      if (!active) return;
+      setRoles((data ?? []).map((r) => r.role as AppRole));
+      setLoading(false);
     };
-    load();
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(() => load());
+
+    // Initial load
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!active) return;
+      if (!session) { setRoles([]); setLoading(false); return; }
+      lastUserId = session.user.id;
+      fetchRoles(session.user.id);
+    });
+
+    // IMPORTANT: never call other supabase methods synchronously inside
+    // onAuthStateChange — it holds the auth lock and will deadlock subsequent
+    // calls (e.g. table inserts hang forever). Defer with setTimeout, and only
+    // refetch when the user identity actually changes.
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const uid = session?.user?.id ?? null;
+      if (uid === lastUserId) return;
+      lastUserId = uid;
+      setTimeout(() => {
+        if (!active) return;
+        if (!uid) { setRoles([]); setLoading(false); return; }
+        fetchRoles(uid);
+      }, 0);
+    });
     return () => { active = false; subscription.unsubscribe(); };
   }, []);
 
