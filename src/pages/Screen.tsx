@@ -265,18 +265,40 @@ const Screen = () => {
 
   // Wrap supabase.functions.invoke with a hard timeout so a single hanging call can't freeze the flow.
   async function invokeWithTimeout(name: string, body: unknown, ms: number) {
-    return await retryTask(
-      `start ${name}`,
-      async () => await Promise.race([
-        supabase.functions.invoke(name, { body }).then((res) => {
-          if (res.error) throw res.error;
-          return res.data;
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} timeout`)), ms)),
-      ]),
-      ms + 5000,
-      1,
-    );
+    // Retry up to 4 times with backoff to absorb transient Edge Runtime 503s
+    // (SUPABASE_EDGE_RUNTIME_SERVICE_DEGRADED) and cold-start failures.
+    const maxAttempts = 4;
+    let lastErr: unknown = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await Promise.race([
+          supabase.functions.invoke(name, { body }).then(async (res) => {
+            if (res.error) {
+              // Try to read structured error body for 503/degraded signals
+              const msg = (res.error as { message?: string })?.message ?? String(res.error);
+              const err = new Error(msg);
+              (err as Error & { _retryable?: boolean })._retryable =
+                /503|degraded|temporarily unavailable|non-2xx/i.test(msg);
+              throw err;
+            }
+            return res.data;
+          }),
+          new Promise((_, reject) =>
+            setTimeout(() => {
+              const err = new Error(`${name} timeout`);
+              (err as Error & { _retryable?: boolean })._retryable = true;
+              reject(err);
+            }, ms),
+          ),
+        ]);
+      } catch (e) {
+        lastErr = e;
+        const retryable = (e as Error & { _retryable?: boolean })?._retryable !== false;
+        if (!retryable || attempt === maxAttempts) break;
+        await sleep(800 * attempt + Math.random() * 400);
+      }
+    }
+    throw lastErr ?? new Error(`${name} failed`);
   }
 
   async function updateJobStatus(id: string, status: string) {
