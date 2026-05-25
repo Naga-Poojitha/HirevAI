@@ -1,3 +1,5 @@
-# Welcome to your Lovable project
+# HirevAI - AI Interview Platform
+An AI-powered interview platform with resume-based questions, 
+voice interviews, and candidate score reports.
 
-TODO: Document your project here
+Tech Stack: React, TypeScript, Supabase, Gemini AI
